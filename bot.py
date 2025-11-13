@@ -124,9 +124,9 @@ async def daily_limit(message: Message):
 
         income = await get_income(message.from_user.id)
         balance = await get_balance(message.from_user.id)
-        saved = balance  # накоплено = текущий баланс
+        saved = balance  # упрощённо: накоплено = текущий баланс
         to_save = max(0, goal_amount - saved)
-        daily_limit = max(0, to_save / days_left)  # ПРАВИЛЬНО: сколько нужно откладывать в день
+        daily_limit = max(0, to_save / days_left)  # ПРАВИЛЬНАЯ ФОРМУЛА
 
         await message.answer(
             f"📊 Лимит на день:\n"
