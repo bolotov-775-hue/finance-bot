@@ -1,65 +1,68 @@
 import os
-import asyncpg
+import psycopg2
 import aiosqlite
-from contextlib import asynccontextmanager
+from contextlib import contextmanager
 
-# Автоматическое определение среды
+# Определяем среду
 IS_RENDER = os.getenv("RENDER") is not None
-DATABASE_URL = os.getenv("DATABASE_URL")  # для Render
+DATABASE_URL = os.getenv("DATABASE_URL")
 USE_POSTGRES = IS_RENDER and DATABASE_URL
 
-@asynccontextmanager
-async def get_db_connection():
-    """Универсальный контекстный менеджер для БД"""
+# Для PostgreSQL — используем sync-версию (aiogram + psycopg2-binary работают вместе)
+@contextmanager
+def get_db_connection():
     conn = None
     try:
         if USE_POSTGRES:
-            conn = await asyncpg.connect(DATABASE_URL)
+            conn = psycopg2.connect(DATABASE_URL)
             yield conn
         else:
             # Локально — SQLite
-            conn = await aiosqlite.connect("finance_bot.db")
-            await conn.execute("PRAGMA foreign_keys = ON")
+            conn = aiosqlite.connect("finance_bot.db")
             yield conn
     finally:
         if conn:
-            await conn.close()
+            if USE_POSTGRES:
+                conn.close()
+            else:
+                conn.close()
 
 async def init_db():
-    async with get_db_connection() as conn:
-        if USE_POSTGRES:
-            # PostgreSQL
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id BIGINT PRIMARY KEY,
-                    daily_limit DOUBLE PRECISION DEFAULT 0,
-                    goal_amount DOUBLE PRECISION DEFAULT 0,
-                    goal_days INTEGER DEFAULT 0,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS transactions (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT NOT NULL,
-                    type VARCHAR(10) CHECK (type IN ('income', 'expense')),
-                    amount DOUBLE PRECISION NOT NULL,
-                    category TEXT DEFAULT 'прочее',
-                    description TEXT DEFAULT '',
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS todos (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT NOT NULL,
-                    text TEXT NOT NULL,
-                    is_done BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-        else:
-            # SQLite
+    if USE_POSTGRES:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        user_id BIGINT PRIMARY KEY,
+                        daily_limit DOUBLE PRECISION DEFAULT 0,
+                        goal_amount DOUBLE PRECISION DEFAULT 0,
+                        goal_days INTEGER DEFAULT 0,
+                        created_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS transactions (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
+                        type VARCHAR(10) CHECK (type IN ('income', 'expense')),
+                        amount DOUBLE PRECISION NOT NULL,
+                        category TEXT DEFAULT 'прочее',
+                        description TEXT DEFAULT '',
+                        created_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS todos (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
+                        text TEXT NOT NULL,
+                        is_done BOOLEAN DEFAULT FALSE,
+                        created_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+            conn.commit()
+    else:
+        async with aiosqlite.connect("finance_bot.db") as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
@@ -89,48 +92,72 @@ async def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-        if isinstance(conn, aiosqlite.Connection):
             await conn.commit()
 
-# --- Основные функции (работают и с SQLite, и с PostgreSQL) ---
+# --- Функции ---
 async def get_user(user_id: int):
-    async with get_db_connection() as conn:
-        if USE_POSTGRES:
-            row = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
-        else:
+    if USE_POSTGRES:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
+                row = cur.fetchone()
+                if row:
+                    return {
+                        "user_id": row[0],
+                        "daily_limit": row[1],
+                        "goal_amount": row[2],
+                        "goal_days": row[3],
+                        "created_at": row[4]
+                    }
+                return None
+    else:
+        async with aiosqlite.connect("finance_bot.db") as conn:
             cursor = await conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
             row = await cursor.fetchone()
-        return row
+            if row:
+                return {
+                    "user_id": row[0],
+                    "daily_limit": row[1],
+                    "goal_amount": row[2],
+                    "goal_days": row[3],
+                    "created_at": row[4]
+                }
+            return None
 
 async def create_user(user_id: int):
-    async with get_db_connection() as conn:
-        if USE_POSTGRES:
-            await conn.execute(
-                """
-                INSERT INTO users (user_id) VALUES ($1)
-                ON CONFLICT (user_id) DO NOTHING
-                """,
-                user_id
-            )
-        else:
+    if USE_POSTGRES:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO users (user_id) VALUES (%s)
+                    ON CONFLICT (user_id) DO NOTHING
+                    """,
+                    (user_id,)
+                )
+            conn.commit()
+    else:
+        async with aiosqlite.connect("finance_bot.db") as conn:
             await conn.execute(
                 "INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,)
             )
-        if isinstance(conn, aiosqlite.Connection):
             await conn.commit()
 
 async def update_goal(user_id: int, goal_amount: float, days: int):
     daily_limit = max(0, goal_amount / days) if days > 0 else 0
-    async with get_db_connection() as conn:
-        if USE_POSTGRES:
-            await conn.execute(
-                """
-                UPDATE users SET goal_amount = $1, goal_days = $2, daily_limit = $3
-                WHERE user_id = $4
-                """,
-                goal_amount, days, daily_limit, user_id
-            )
-        else:
+    if USE_POSTGRES:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE users SET goal_amount = %s, goal_days = %s, daily_limit = %s
+                    WHERE user_id = %s
+                    """,
+                    (goal_amount, days, daily_limit, user_id)
+                )
+            conn.commit()
+    else:
+        async with aiosqlite.connect("finance_bot.db") as conn:
             await conn.execute(
                 """
                 UPDATE users SET goal_amount = ?, goal_days = ?, daily_limit = ?
@@ -138,37 +165,42 @@ async def update_goal(user_id: int, goal_amount: float, days: int):
                 """,
                 (goal_amount, days, daily_limit, user_id)
             )
-        if isinstance(conn, aiosqlite.Connection):
             await conn.commit()
 
 async def add_transaction(user_id: int, t_type: str, amount: float, category: str = "прочее", desc: str = ""):
-    async with get_db_connection() as conn:
-        if USE_POSTGRES:
-            await conn.execute(
-                """
-                INSERT INTO transactions (user_id, type, amount, category, description)
-                VALUES ($1, $2, $3, $4, $5)
-                """,
-                user_id, t_type, amount, category, desc
-            )
-        else:
+    if USE_POSTGRES:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO transactions (user_id, type, amount, category, description)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (user_id, t_type, amount, category, desc)
+                )
+            conn.commit()
+    else:
+        async with aiosqlite.connect("finance_bot.db") as conn:
             await conn.execute(
                 "INSERT INTO transactions (user_id, type, amount, category, description) VALUES (?, ?, ?, ?, ?)",
                 (user_id, t_type, amount, category, desc)
             )
-        if isinstance(conn, aiosqlite.Connection):
             await conn.commit()
 
 async def get_balance(user_id: int):
-    async with get_db_connection() as conn:
-        if USE_POSTGRES:
-            row = await conn.fetchrow("""
-                SELECT 
-                    COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0) -
-                    COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0)
-                FROM transactions WHERE user_id = $1
-            """, user_id)
-        else:
+    if USE_POSTGRES:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT 
+                        COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0) -
+                        COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0)
+                    FROM transactions WHERE user_id = %s
+                """, (user_id,))
+                row = cur.fetchone()
+                return row[0] if row else 0.0
+    else:
+        async with aiosqlite.connect("finance_bot.db") as conn:
             cursor = await conn.execute("""
                 SELECT 
                     COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0) -
@@ -176,18 +208,22 @@ async def get_balance(user_id: int):
                 FROM transactions WHERE user_id = ?
             """, (user_id,))
             row = await cursor.fetchone()
-        return row[0] if row and row[0] is not None else 0.0
+            return row[0] if row else 0.0
 
 async def get_today_expenses(user_id: int):
-    async with get_db_connection() as conn:
-        if USE_POSTGRES:
-            row = await conn.fetchrow("""
-                SELECT COALESCE(SUM(amount), 0)
-                FROM transactions
-                WHERE user_id = $1 AND type = 'expense' 
-                  AND created_at >= DATE_TRUNC('day', NOW() AT TIME ZONE 'Europe/Moscow')
-            """, user_id)
-        else:
+    if USE_POSTGRES:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT COALESCE(SUM(amount), 0)
+                    FROM transactions
+                    WHERE user_id = %s AND type = 'expense' 
+                      AND created_at >= DATE_TRUNC('day', NOW() AT TIME ZONE 'Europe/Moscow')
+                """, (user_id,))
+                row = cur.fetchone()
+                return row[0] if row else 0.0
+    else:
+        async with aiosqlite.connect("finance_bot.db") as conn:
             cursor = await conn.execute("""
                 SELECT COALESCE(SUM(amount), 0)
                 FROM transactions
@@ -195,32 +231,40 @@ async def get_today_expenses(user_id: int):
                   AND DATE(created_at) = DATE('now', 'localtime')
             """, (user_id,))
             row = await cursor.fetchone()
-        return row[0] if row else 0.0
+            return row[0] if row else 0.0
 
 # --- TODO ---
 async def add_todo(user_id: int, text: str):
-    async with get_db_connection() as conn:
-        if USE_POSTGRES:
-            await conn.execute("INSERT INTO todos (user_id, text) VALUES ($1, $2)", user_id, text)
-        else:
+    if USE_POSTGRES:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO todos (user_id, text) VALUES (%s, %s)", (user_id, text))
+            conn.commit()
+    else:
+        async with aiosqlite.connect("finance_bot.db") as conn:
             await conn.execute("INSERT INTO todos (user_id, text) VALUES (?, ?)", (user_id, text))
-        if isinstance(conn, aiosqlite.Connection):
             await conn.commit()
 
 async def get_todos(user_id: int):
-    async with get_db_connection() as conn:
-        if USE_POSTGRES:
-            rows = await conn.fetch("SELECT id, text, is_done FROM todos WHERE user_id = $1", user_id)
-        else:
+    if USE_POSTGRES:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, text, is_done FROM todos WHERE user_id = %s", (user_id,))
+                rows = cur.fetchall()
+                return [{"id": r[0], "text": r[1], "is_done": r[2]} for r in rows]
+    else:
+        async with aiosqlite.connect("finance_bot.db") as conn:
             cursor = await conn.execute("SELECT id, text, is_done FROM todos WHERE user_id = ?", (user_id,))
             rows = await cursor.fetchall()
-        return rows
+            return [{"id": r[0], "text": r[1], "is_done": r[2]} for r in rows]
 
 async def toggle_todo_done(todo_id: int):
-    async with get_db_connection() as conn:
-        if USE_POSTGRES:
-            await conn.execute("UPDATE todos SET is_done = NOT is_done WHERE id = $1", todo_id)
-        else:
+    if USE_POSTGRES:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE todos SET is_done = NOT is_done WHERE id = %s", (todo_id,))
+            conn.commit()
+    else:
+        async with aiosqlite.connect("finance_bot.db") as conn:
             await conn.execute("UPDATE todos SET is_done = NOT is_done WHERE id = ?", (todo_id,))
-        if isinstance(conn, aiosqlite.Connection):
             await conn.commit()
