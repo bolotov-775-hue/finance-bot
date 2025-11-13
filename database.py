@@ -50,6 +50,17 @@ async def init_db():
                     due_date DATE
                 )
             """)
+
+            # МИГРАЦИЯ: добавляем столбец due_date, если его нет
+            try:
+                cur.execute("SELECT due_date FROM todos LIMIT 1")
+            except psycopg2.errors.UndefinedColumn:
+                try:
+                    cur.execute("ALTER TABLE todos ADD COLUMN due_date DATE")
+                    print("✅ Добавлен столбец due_date в todos")
+                except Exception as e:
+                    print(f"❌ Ошибка при добавлении due_date: {e}")
+
             conn.commit()
         else:
             await conn.execute("""
@@ -129,7 +140,6 @@ async def clear_goal(user_id):
             await conn.commit()
 
 async def clear_all(user_id):
-    """Очистить ВСЁ: транзакции, цель, задачи"""
     with get_db() as conn:
         if IS_RENDER and DATABASE_URL:
             cur = conn.cursor()
