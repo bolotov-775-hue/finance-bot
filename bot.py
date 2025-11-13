@@ -5,7 +5,7 @@ from datetime import datetime, date, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command, StateFilter  # ⬅️ Убрали Text
+from aiogram.filters import Command, StateFilter  # ⬅️ Убрали F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -61,7 +61,7 @@ async def cmd_start(message: Message):
     )
 
 # 💰 Доход
-@dp.message(lambda message: message.text == "💰 Доход")  # ⬅️ Лямбда вместо Text
+@dp.message(lambda message: message.text == "💰 Доход")
 async def cmd_income(message: Message, state: FSMContext):
     await message.answer("💸 Введите сумму дохода (например: `50000`):")
     await state.set_state(FinanceStates.waiting_for_income)
@@ -78,7 +78,7 @@ async def process_income(message: Message, state: FSMContext):
     await state.clear()
 
 # 🛒 Расход
-@dp.message(lambda message: message.text == "🛒 Расход")  # ⬅️ Лямбда вместо Text
+@dp.message(lambda message: message.text == "🛒 Расход")
 async def cmd_expense_menu(message: Message):
     buttons = []
     for cat in expense_categories:
@@ -89,7 +89,7 @@ async def cmd_expense_menu(message: Message):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
 
-@dp.callback_query(F.data.startswith("exp_cat:"))
+@dp.callback_query(lambda callback: callback.data.startswith("exp_cat:"))  # ⬅️ Лямбда вместо F
 async def process_expense_category(callback: types.CallbackQuery, state: FSMContext):
     category = callback.data.split(":")[1]
     await state.update_data(category=category)
@@ -120,13 +120,13 @@ async def process_expense_amount(message: Message, state: FSMContext):
     await state.clear()
 
 # 📊 Баланс
-@dp.message(lambda message: message.text == "📊 Баланс")  # ⬅️ Лямбда вместо Text
+@dp.message(lambda message: message.text == "📊 Баланс")
 async def cmd_balance(message: Message):
     balance = await get_balance(message.from_user.id)
     await message.answer(f"💰 Баланс: {balance:.2f} ₽", reply_markup=main_menu)
 
 # 🎯 Цель
-@dp.message(lambda message: message.text == "🎯 Цель")  # ⬅️ Лямбда вместо Text
+@dp.message(lambda message: message.text == "🎯 Цель")
 async def cmd_goal(message: Message, state: FSMContext):
     await message.answer(
         "🎯 Установите финансовую цель.\n"
@@ -153,7 +153,7 @@ async def process_goal(message: Message, state: FSMContext):
     await state.clear()
 
 # 📋 Задачи
-@dp.message(lambda message: message.text == "📋 Задачи")  # ⬅️ Лямбда вместо Text
+@dp.message(lambda message: message.text == "📋 Задачи")
 async def cmd_todos(message: Message):
     todos = await get_todos(message.from_user.id)
     if not todos:
@@ -176,7 +176,7 @@ async def cmd_todos(message: Message):
     
     await message.answer("📋 Ваши задачи:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-@dp.callback_query(F.data == "todo:add")
+@dp.callback_query(lambda callback: callback.data == "todo:add")  # ⬅️ Лямбда вместо F
 async def todo_add(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("📝 Введите задачу:")
     await state.set_state(FinanceStates.waiting_for_todo)
@@ -188,14 +188,14 @@ async def process_todo(message: Message, state: FSMContext):
     await message.answer("✅ Задача добавлена!", reply_markup=main_menu)
     await state.clear()
 
-@dp.callback_query(F.data.startswith("todo:toggle:"))
+@dp.callback_query(lambda callback: callback.data.startswith("todo:toggle:"))  # ⬅️ Лямбда вместо F
 async def toggle_todo(callback: types.CallbackQuery):
     todo_id = int(callback.data.split(":")[2])
     await toggle_todo_done(todo_id)
     await cmd_todos(callback.message)
 
 # ⏰ Напоминания
-@dp.message(lambda message: message.text == "⏰ Напоминания")  # ⬅️ Лямбда вместо Text
+@dp.message(lambda message: message.text == "⏰ Напоминания")
 async def cmd_remind_menu(message: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📅 На дату", callback_data="remind:date")],
@@ -203,7 +203,7 @@ async def cmd_remind_menu(message: Message):
     ])
     await message.answer("🔔 Выберите тип:", reply_markup=kb)
 
-@dp.callback_query(F.data == "remind:date")
+@dp.callback_query(lambda callback: callback.data == "remind:date")  # ⬅️ Лямбда вместо F
 async def remind_date_start(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("📝 Введите текст напоминания:")
     await state.set_state(ReminderState.waiting_for_text)
@@ -235,7 +235,7 @@ async def remind_get_date(message: Message, state: FSMContext):
     except:
         await message.answer("❌ Неверный формат. Пример: `15.12.2025 18:30`")
 
-@dp.callback_query(F.data.startswith("remind:"))
+@dp.callback_query(lambda callback: callback.data.startswith("remind:"))  # ⬅️ Лямбда вместо F
 async def remind_schedule(callback: types.CallbackQuery, state: FSMContext):
     choice = callback.data.split(":")[1]
     data = await state.get_data()
@@ -274,7 +274,7 @@ async def send_reminder(user_id: int, text: str):
         print(f"[Напоминание] Ошибка {user_id}: {e}")
 
 # ❓ Помощь
-@dp.message(lambda message: message.text == "❓ Помощь")  # ⬅️ Лямбда вместо Text
+@dp.message(lambda message: message.text == "❓ Помощь")
 async def cmd_help(message: Message):
     await message.answer(
         "📚 Справка:\n"
@@ -287,7 +287,7 @@ async def cmd_help(message: Message):
     )
 
 # ← Назад
-@dp.callback_query(F.data == "back_to_menu")
+@dp.callback_query(lambda callback: callback.data == "back_to_menu")  # ⬅️ Лямбда вместо F
 async def back_to_menu(callback: types.CallbackQuery):
     await cmd_start(callback.message)
     await callback.answer()
