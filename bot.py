@@ -5,7 +5,7 @@ from datetime import datetime, date, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command, StateFilter, F
+from aiogram.filters import Command, StateFilter, Text  # ⬅️ Используем Text вместо F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -61,7 +61,7 @@ async def cmd_start(message: Message):
     )
 
 # 💰 Доход
-@dp.message(F.text == "💰 Доход")
+@dp.message(Text(text="💰 Доход"))  # ⬅️ Заменено F на Text
 async def cmd_income(message: Message, state: FSMContext):
     await message.answer("💸 Введите сумму дохода (например: `50000`):")
     await state.set_state(FinanceStates.waiting_for_income)
@@ -78,14 +78,14 @@ async def process_income(message: Message, state: FSMContext):
     await state.clear()
 
 # 🛒 Расход
-@dp.message(F.text == "🛒 Расход")
+@dp.message(Text(text="🛒 Расход"))  # ⬅️ Заменено F на Text
 async def cmd_expense_menu(message: Message):
     buttons = []
     for cat in expense_categories:
         buttons.append([InlineKeyboardButton(text=f"{cat.capitalize()}", callback_data=f"exp_cat:{cat}")])
     buttons.append([InlineKeyboardButton(text="← Назад", callback_data="back_to_menu")])
     await message.answer(
-        "Выберите категорию:",
+        "Выберите категорию расхода:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
 
@@ -120,13 +120,13 @@ async def process_expense_amount(message: Message, state: FSMContext):
     await state.clear()
 
 # 📊 Баланс
-@dp.message(F.text == "📊 Баланс")
+@dp.message(Text(text="📊 Баланс"))  # ⬅️ Заменено F на Text
 async def cmd_balance(message: Message):
     balance = await get_balance(message.from_user.id)
     await message.answer(f"💰 Баланс: {balance:.2f} ₽", reply_markup=main_menu)
 
 # 🎯 Цель
-@dp.message(F.text == "🎯 Цель")
+@dp.message(Text(text="🎯 Цель"))  # ⬅️ Заменено F на Text
 async def cmd_goal(message: Message, state: FSMContext):
     await message.answer(
         "🎯 Установите финансовую цель.\n"
@@ -153,7 +153,7 @@ async def process_goal(message: Message, state: FSMContext):
     await state.clear()
 
 # 📋 Задачи
-@dp.message(F.text == "📋 Задачи")
+@dp.message(Text(text="📋 Задачи"))  # ⬅️ Заменено F на Text
 async def cmd_todos(message: Message):
     todos = await get_todos(message.from_user.id)
     if not todos:
@@ -195,7 +195,7 @@ async def toggle_todo(callback: types.CallbackQuery):
     await cmd_todos(callback.message)
 
 # ⏰ Напоминания
-@dp.message(F.text == "⏰ Напоминания")
+@dp.message(Text(text="⏰ Напоминания"))  # ⬅️ Заменено F на Text
 async def cmd_remind_menu(message: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📅 На дату", callback_data="remind:date")],
@@ -274,7 +274,7 @@ async def send_reminder(user_id: int, text: str):
         print(f"[Напоминание] Ошибка {user_id}: {e}")
 
 # ❓ Помощь
-@dp.message(F.text == "❓ Помощь")
+@dp.message(Text(text="❓ Помощь"))  # ⬅️ Заменено F на Text
 async def cmd_help(message: Message):
     await message.answer(
         "📚 Справка:\n"
