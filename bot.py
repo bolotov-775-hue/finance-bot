@@ -149,7 +149,7 @@ async def process_goal(message: Message, state: FSMContext):
             reply_markup=main_menu
         )
     except Exception as e:
-        await message.answer("❌ Ошибка. Пример: `10000 15.12.2025`")
+        await message.answer(f"❌ Ошибка: {e}\nПример: `10000 15.12.2025`")
     await state.clear()
 
 # 📋 Задачи
