@@ -1,226 +1,302 @@
 import asyncio
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiohttp import web
 
 from database import *
 
-# 🔐 Токен — из переменной окружения (в Render задаётся вручную)
+# 🔐 Токен
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN не установлен. Укажите в переменных окружения.")
+    raise ValueError("❌ BOT_TOKEN не установлен")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
-
-# Проверка: запущен ли на Render
 IS_RENDER = os.getenv("RENDER") is not None
 
 # 🧠 Состояния
 class FinanceStates(StatesGroup):
     waiting_for_income = State()
-    waiting_for_expense = State()
+    waiting_for_expense_amount = State()
+    waiting_for_expense_category = State()
     waiting_for_goal = State()
     waiting_for_todo = State()
 
-# 🛠 Утилиты
-def parse_amount_category(text: str):
-    parts = text.strip().split(maxsplit=1)
-    if len(parts) == 1:
-        return float(parts[0]), "прочее"
-    try:
-        amount = float(parts[0])
-        category = parts[1].strip() or "прочее"
-        return amount, category
-    except ValueError:
-        raise ValueError("Неверный формат")
+class ReminderState(StatesGroup):
+    waiting_for_text = State()
+    waiting_for_date = State()
+    waiting_for_time_choice = State()
 
-# 📱 Команды
+# 🎨 Кнопки
+main_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="💰 Доход"), KeyboardButton(text="🛒 Расход")],
+        [KeyboardButton(text="📊 Баланс"), KeyboardButton(text="🎯 Цель")],
+        [KeyboardButton(text="📋 Задачи"), KeyboardButton(text="⏰ Напоминания")],
+        [KeyboardButton(text="❓ Помощь")]
+    ],
+    resize_keyboard=True
+)
+
+expense_categories = ["еда", "транспорт", "лекарства", "быт", "развлечения", "другое"]
+
+# 📱 /start
 @dp.message(Command("start"))
-async def cmd_start(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    await create_user(user_id)
+async def cmd_start(message: Message):
+    await create_user(message.from_user.id)
     await message.answer(
-        "👋 Привет! Я — ваш финансовый помощник.\n\n"
-        "📌 Команды:\n"
-        "/income — +доход\n"
-        "/expense — –расход\n"
-        "/balance — баланс\n"
-        "/today — траты сегодня + лимит\n"
-        "/goal — цель (например: `10000 30`)\n"
-        "/todo — добавить задачу\n"
-        "/todos — список задач\n"
-        "/done 1 — отметить задачу №1 как сделанную"
+        "👋 Привет! Я — ваш финансовый помощник 💊💰\n"
+        "Выберите действие в меню ниже:",
+        reply_markup=main_menu
     )
 
-@dp.message(Command("balance"))
-async def cmd_balance(message: Message):
-    balance = await get_balance(message.from_user.id)
-    await message.answer(f"💰 Баланс: {balance:.2f} ₽")
-
-@dp.message(Command("today"))
-async def cmd_today(message: Message):
-    user_id = message.from_user.id
-    spent = await get_today_expenses(user_id)
-    user = await get_user(user_id)
-    daily_limit = user["daily_limit"] if user else 0
-    left = max(0, daily_limit - spent)
-    status = "🟢 В пределах лимита" if spent <= daily_limit else "🔴 Превышен лимит"
-    await message.answer(
-        f"📆 Сегодня потрачено: {spent:.2f} ₽\n"
-        f"🎯 Лимит на день: {daily_limit:.2f} ₽\n"
-        f"➡️ Осталось: {left:.2f} ₽\n"
-        f"{status}"
-    )
-
-@dp.message(Command("income"))
+# 💰 Доход
+@dp.message(F.text == "💰 Доход")
 async def cmd_income(message: Message, state: FSMContext):
-    await message.answer("💸 Введите: `сумма [категория]` (например: `50000 зарплата`)")
+    await message.answer("💸 Введите сумму дохода (например: `50000`):")
     await state.set_state(FinanceStates.waiting_for_income)
 
 @dp.message(FinanceStates.waiting_for_income)
 async def process_income(message: Message, state: FSMContext):
     try:
-        amount, category = parse_amount_category(message.text)
-        await add_transaction(message.from_user.id, "income", amount, category)
-        await message.answer(f"✅ Доход +{amount} ₽ добавлен (категория: {category})")
-    except Exception:
-        await message.answer("❌ Ошибка. Пример: `50000 зарплата`")
+        amount = float(message.text)
+        await add_transaction(message.from_user.id, "income", amount)
+        await update_daily_limit(message.from_user.id)
+        await message.answer(f"✅ Доход +{amount} ₽", reply_markup=main_menu)
+    except:
+        await message.answer("❌ Введите число.")
     await state.clear()
 
-@dp.message(Command("expense"))
-async def cmd_expense(message: Message, state: FSMContext):
-    await message.answer("🛒 Введите: `сумма [категория]` (например: `450 супермаркет`)")
-    await state.set_state(FinanceStates.waiting_for_expense)
+# 🛒 Расход
+@dp.message(F.text == "🛒 Расход")
+async def cmd_expense_menu(message: Message):
+    buttons = []
+    for cat in expense_categories:
+        buttons.append([InlineKeyboardButton(text=f"{cat.capitalize()}", callback_data=f"exp_cat:{cat}")])
+    buttons.append([InlineKeyboardButton(text="← Назад", callback_data="back_to_menu")])
+    await message.answer(
+        "Выберите категорию:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
 
-@dp.message(FinanceStates.waiting_for_expense)
-async def process_expense(message: Message, state: FSMContext):
+@dp.callback_query(F.data.startswith("exp_cat:"))
+async def process_expense_category(callback: types.CallbackQuery, state: FSMContext):
+    category = callback.data.split(":")[1]
+    await state.update_data(category=category)
+    await callback.message.edit_text(f"Категория: {category}\nВведите сумму:")
+    await state.set_state(FinanceStates.waiting_for_expense_amount)
+    await callback.answer()
+
+@dp.message(FinanceStates.waiting_for_expense_amount)
+async def process_expense_amount(message: Message, state: FSMContext):
     try:
-        amount, category = parse_amount_category(message.text)
+        amount = float(message.text)
+        data = await state.get_data()
+        category = data["category"]
         await add_transaction(message.from_user.id, "expense", amount, category)
+        
+        # Обновляем лимит и показываем остаток
+        daily_limit = await update_daily_limit(message.from_user.id)
         spent = await get_today_expenses(message.from_user.id)
-        user = await get_user(message.from_user.id)
-        daily_limit = user["daily_limit"] if user else 0
-        if daily_limit > 0 and spent > daily_limit:
-            await message.answer(f"⚠️ Превышен дневной лимит на {spent - daily_limit:.2f} ₽!")
-        await message.answer(f"✅ Расход {amount} ₽ записан (категория: {category})")
-    except Exception:
-        await message.answer("❌ Ошибка. Пример: `450 супермаркет`")
+        left = max(0, daily_limit - spent)
+        
+        await message.answer(
+            f"✅ Расход {amount} ₽ ({category})\n"
+            f"📆 Осталось на сегодня: {left:.2f} ₽",
+            reply_markup=main_menu
+        )
+    except:
+        await message.answer("❌ Введите число.")
     await state.clear()
 
-@dp.message(Command("goal"))
+# 📊 Баланс
+@dp.message(F.text == "📊 Баланс")
+async def cmd_balance(message: Message):
+    balance = await get_balance(message.from_user.id)
+    await message.answer(f"💰 Баланс: {balance:.2f} ₽", reply_markup=main_menu)
+
+# 🎯 Цель
+@dp.message(F.text == "🎯 Цель")
 async def cmd_goal(message: Message, state: FSMContext):
     await message.answer(
-        "🎯 Установите цель: `сумма дней`\n"
-        "Пример: `10000 30` — накопить 10 000 ₽ за 30 дней"
+        "🎯 Установите финансовую цель.\n"
+        "Формат: `сумма ДД.ММ.ГГГГ`\n"
+        "Пример: `10000 15.12.2025`"
     )
     await state.set_state(FinanceStates.waiting_for_goal)
 
 @dp.message(FinanceStates.waiting_for_goal)
 async def process_goal(message: Message, state: FSMContext):
     try:
-        parts = message.text.strip().split()
-        if len(parts) != 2:
-            raise ValueError()
+        parts = message.text.strip().split(maxsplit=1)
         goal_amount = float(parts[0])
-        days = int(parts[1])
-        if days <= 0:
-            raise ValueError()
-        await update_goal(message.from_user.id, goal_amount, days)
+        end_date = datetime.strptime(parts[1], "%d.%m.%Y").date()
+        await update_goal(message.from_user.id, goal_amount, end_date)
+        await update_daily_limit(message.from_user.id)
         await message.answer(
-            f"🎯 Цель: накопить {goal_amount:.0f} ₽ за {days} дней.\n"
-            f"📅 Дневной лимит будет пересчитан на основе доходов."
+            f"🎯 Цель: накопить {goal_amount:.0f} ₽ к {end_date.strftime('%d.%m.%Y')}\n"
+            f"📅 Дневной лимит рассчитан автоматически.",
+            reply_markup=main_menu
         )
-    except Exception:
-        await message.answer("❌ Ошибка. Пример: `10000 30`")
+    except Exception as e:
+        await message.answer("❌ Ошибка. Пример: `10000 15.12.2025`")
     await state.clear()
 
-@dp.message(Command("todo"))
-async def cmd_todo_add(message: Message, state: FSMContext):
-    await message.answer("📝 Введите задачу:")
+# 📋 Задачи
+@dp.message(F.text == "📋 Задачи")
+async def cmd_todos(message: Message):
+    todos = await get_todos(message.from_user.id)
+    if not todos:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="+ Добавить", callback_data="todo:add")],
+            [InlineKeyboardButton(text="← Назад", callback_data="back_to_menu")]
+        ])
+        await message.answer("📭 Нет задач.", reply_markup=kb)
+        return
+    
+    kb = []
+    for t in todos:
+        mark = "✅ " if t["is_done"] else ""
+        kb.append([InlineKeyboardButton(
+            text=f"{mark}{t['text']}", 
+            callback_data=f"todo:toggle:{t['id']}"
+        )])
+    kb.append([InlineKeyboardButton(text="+ Добавить", callback_data="todo:add")])
+    kb.append([InlineKeyboardButton(text="← Назад", callback_data="back_to_menu")])
+    
+    await message.answer("📋 Ваши задачи:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@dp.callback_query(F.data == "todo:add")
+async def todo_add(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("📝 Введите задачу:")
     await state.set_state(FinanceStates.waiting_for_todo)
+    await callback.answer()
 
 @dp.message(FinanceStates.waiting_for_todo)
 async def process_todo(message: Message, state: FSMContext):
     await add_todo(message.from_user.id, message.text)
-    await message.answer("✅ Задача добавлена!")
+    await message.answer("✅ Задача добавлена!", reply_markup=main_menu)
     await state.clear()
 
-@dp.message(Command("todos"))
-async def cmd_todos(message: Message):
-    todos = await get_todos(message.from_user.id)
-    if not todos:
-        await message.answer("📭 Нет задач.")
-        return
-    text = "📋 Задачи:\n"
-    for t in todos:
-        mark = "✅" if t["is_done"] else "🔲"  # PostgreSQL возвращает dict, SQLite — tuple
-        tid = t["id"] if isinstance(t, dict) else t[0]
-        txt = t["text"] if isinstance(t, dict) else t[1]
-        done = t["is_done"] if isinstance(t, dict) else t[2]
-        mark = "✅" if done else "🔲"
-        text += f"{mark} [{tid}] {txt}\n"
-    text += "\n✅ Чтобы завершить: `/done 1`"
-    await message.answer(text)
+@dp.callback_query(F.data.startswith("todo:toggle:"))
+async def toggle_todo(callback: types.CallbackQuery):
+    todo_id = int(callback.data.split(":")[2])
+    await toggle_todo_done(todo_id)
+    await cmd_todos(callback.message)
 
-@dp.message(Command("done"))
-async def cmd_done(message: Message):
+# ⏰ Напоминания
+@dp.message(F.text == "⏰ Напоминания")
+async def cmd_remind_menu(message: Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📅 На дату", callback_data="remind:date")],
+        [InlineKeyboardButton(text="← Назад", callback_data="back_to_menu")]
+    ])
+    await message.answer("🔔 Выберите тип:", reply_markup=kb)
+
+@dp.callback_query(F.data == "remind:date")
+async def remind_date_start(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("📝 Введите текст напоминания:")
+    await state.set_state(ReminderState.waiting_for_text)
+    await callback.answer()
+
+@dp.message(ReminderState.waiting_for_text)
+async def remind_get_text(message: Message, state: FSMContext):
+    await state.update_data(text=message.text)
+    await message.answer("📅 Введите дату и время (пример: `15.12.2025 18:30`):")
+    await state.set_state(ReminderState.waiting_for_date)
+
+@dp.message(ReminderState.waiting_for_date)
+async def remind_get_date(message: Message, state: FSMContext):
+    data = await state.get_data()
+    text = data["text"]
     try:
-        todo_id = int(message.text.split()[1])
-        await toggle_todo_done(todo_id)
-        await message.answer(f"✅ Задача №{todo_id} обновлена.")
-    except Exception:
-        await message.answer("❌ Используйте: `/done 123`")
+        dt = datetime.strptime(message.text.strip(), "%d.%m.%Y %H:%M")
+        await state.update_data(dt=dt)
+        await message.answer(
+            f"✅ Напоминание: «{text}»\n📅 {dt.strftime('%d.%m.%Y %H:%M')}\nКогда прислать?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="За 1 день", callback_data="remind:1d")],
+                [InlineKeyboardButton(text="За 1 час", callback_data="remind:1h")],
+                [InlineKeyboardButton(text="Оба", callback_data="remind:both")],
+                [InlineKeyboardButton(text="← Назад", callback_data="back_to_menu")]
+            ])
+        )
+        await state.set_state(ReminderState.waiting_for_time_choice)
+    except:
+        await message.answer("❌ Неверный формат. Пример: `15.12.2025 18:30`")
 
-# --- Напоминания (ежедневно в 09:00) ---
+@dp.callback_query(F.data.startswith("remind:"))
+async def remind_schedule(callback: types.CallbackQuery, state: FSMContext):
+    choice = callback.data.split(":")[1]
+    data = await state.get_data()
+    text = data["text"]
+    dt = data["dt"]
+    user_id = callback.from_user.id
+    base_id = f"remind_{user_id}_{int(dt.timestamp())}"
+    
+    if choice in ["1d", "both"]:
+        job_id = f"{base_id}_1d"
+        trigger = CronTrigger(
+            year=dt.year, month=dt.month, day=dt.day-1,
+            hour=dt.hour, minute=dt.minute,
+            timezone="Europe/Moscow"
+        )
+        scheduler.add_job(send_reminder, trigger, [user_id, f"💊 Завтра: {text}"], id=job_id)
+    
+    if choice in ["1h", "both"]:
+        job_id = f"{base_id}_1h"
+        trigger = CronTrigger(
+            year=dt.year, month=dt.month, day=dt.day,
+            hour=dt.hour-1, minute=dt.minute,
+            timezone="Europe/Moscow"
+        )
+        scheduler.add_job(send_reminder, trigger, [user_id, f"⏰ Через час: {text}"], id=job_id)
+    
+    await callback.message.edit_text("✅ Напоминание установлено!")
+    await state.clear()
+    await callback.answer()
+
+# 📩 Отправка напоминания
 async def send_reminder(user_id: int, text: str):
     try:
-        await bot.send_message(user_id, f"⏰ Напоминание:\n\n{text}")
+        await bot.send_message(user_id, text)
     except Exception as e:
         print(f"[Напоминание] Ошибка {user_id}: {e}")
 
-# Регистрация напоминания (можно расширить позже)
-@dp.message(Command("remind"))
-async def cmd_remind(message: Message):
+# ❓ Помощь
+@dp.message(F.text == "❓ Помощь")
+async def cmd_help(message: Message):
     await message.answer(
-        "🔔 Напишите текст напоминания — я буду присылать его ежедневно в 09:00.\n"
-        "(Пока без даты/времени — для MVP)"
+        "📚 Справка:\n"
+        "• 💰 Доход — добавить поступление\n"
+        "• 🛒 Расход — трата с категорией\n"
+        "• 🎯 Цель — `сумма ДД.ММ.ГГГГ`\n"
+        "• 📋 Задачи — интерактивный список\n"
+        "• ⏰ Напоминания — дата и выбор времени",
+        reply_markup=main_menu
     )
-    # В будущем можно добавить FSM для выбора времени
 
-@dp.message(lambda msg: not msg.text.startswith("/"))
-async def handle_reminder_text(message: Message):
-    user_id = message.from_user.id
-    text = message.text
-    job_id = f"remind_{user_id}"
-    # Удалим старое и добавим новое
-    if scheduler.get_job(job_id):
-        scheduler.remove_job(job_id)
-    scheduler.add_job(
-        send_reminder,
-        CronTrigger(hour=9, minute=0, timezone="Europe/Moscow"),
-        args=[user_id, text],
-        id=job_id,
-        replace_existing=True
-    )
-    await message.answer(f"✅ Напоминание установлено:\n«{text}»\nБудет приходить ежедневно в 09:00.")
+# ← Назад
+@dp.callback_query(F.data == "back_to_menu")
+async def back_to_menu(callback: types.CallbackQuery):
+    await cmd_start(callback.message)
+    await callback.answer()
 
 # 🚀 Запуск
 async def main():
     await init_db()
     scheduler.start()
 
-    # Для Render: HTTP-сервер (health check)
     if IS_RENDER:
         app = web.Application()
         app.router.add_get("/", lambda _: web.Response(text="✅ Бот жив."))
