@@ -29,6 +29,7 @@ async def init_db():
     if USE_POSTGRES:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
+                # 1. Создаём таблицы
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS users (
                         user_id BIGINT PRIMARY KEY,
@@ -60,23 +61,29 @@ async def init_db():
                     )
                 """)
 
-                # === МИГРАЦИЯ: безопасное добавление столбцов ===
-                for col, sql in [
-                    ("goal_end_date", "ALTER TABLE users ADD COLUMN IF NOT EXISTS goal_end_date DATE"),
-                    ("saved_so_far", "ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_so_far DOUBLE PRECISION DEFAULT 0"),
-                    ("subcategory", "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS subcategory TEXT DEFAULT ''")
-                ]:
-                    try:
-                        cur.execute(f"SELECT {col} FROM users LIMIT 1" if "goal" in col else f"SELECT {col} FROM transactions LIMIT 1")
-                    except psycopg2.errors.UndefinedColumn:
-                        try:
-                            cur.execute(sql)
-                            print(f"✅ Добавлен {col}")
-                        except Exception as e:
-                            print(f"❌ {col}: {e}")
-                            conn.rollback()
+                # 2. МИГРАЦИЯ: безопасное добавление столбцов через information_schema
+                migrations = [
+                    ("users", "goal_end_date", "DATE"),
+                    ("users", "saved_so_far", "DOUBLE PRECISION DEFAULT 0"),
+                    ("transactions", "subcategory", "TEXT DEFAULT ''")
+                ]
 
-            conn.commit()
+                for table, col, col_type in migrations:
+                    try:
+                        # Проверяем, существует ли столбец
+                        cur.execute("""
+                            SELECT 1 FROM information_schema.columns
+                            WHERE table_name = %s AND column_name = %s
+                        """, (table, col))
+                        if not cur.fetchone():
+                            # Добавляем, если отсутствует
+                            cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+                            print(f"✅ Добавлен столбец {col} в {table}")
+                    except Exception as e:
+                        print(f"⚠️ Пропущена миграция {col} ({e})")
+                        conn.rollback()  # Откатываем текущую транзакцию, чтобы не сломать последующие
+
+                conn.commit()
     else:
         # SQLite (локально)
         async with aiosqlite.connect("finance_bot.db") as conn:
@@ -111,43 +118,54 @@ async def init_db():
                 )
             """)
 
-            # Миграция для SQLite
-            async def add_column(table, col_def):
+            # Миграция для SQLite (через PRAGMA)
+            async def ensure_column(table, col_def):
                 try:
                     await conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
-                except:
-                    pass  # игнорируем, если столбец уже есть
+                except aiosqlite.OperationalError as e:
+                    if "duplicate column" in str(e).lower():
+                        pass  # уже есть — игнорируем
+                    else:
+                        print(f"⚠️ SQLite миграция: {e}")
 
-            await add_column("users", "goal_end_date TEXT")
-            await add_column("users", "saved_so_far REAL DEFAULT 0")
-            await add_column("transactions", "subcategory TEXT DEFAULT ''")
+            await ensure_column("users", "goal_end_date TEXT")
+            await ensure_column("users", "saved_so_far REAL DEFAULT 0")
+            await ensure_column("transactions", "subcategory TEXT DEFAULT ''")
+
             await conn.commit()
 
-# --- Основные функции ---
+# --- Функции работы с данными ---
 async def get_user(user_id: int):
     if USE_POSTGRES:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
                 row = cur.fetchone()
-                return row and {
-                    "user_id": row[0], "daily_limit": row[1], "goal_amount": row[2],
-                    "goal_end_date": row[3], "saved_so_far": row[4]
-                }
+                if row:
+                    return {
+                        "user_id": row[0], "daily_limit": row[1], "goal_amount": row[2],
+                        "goal_end_date": row[3], "saved_so_far": row[4]
+                    }
+                return None
     else:
         async with aiosqlite.connect("finance_bot.db") as conn:
             cursor = await conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
             row = await cursor.fetchone()
-            return row and {
-                "user_id": row[0], "daily_limit": row[1], "goal_amount": row[2],
-                "goal_end_date": row[3], "saved_so_far": row[4]
-            }
+            if row:
+                return {
+                    "user_id": row[0], "daily_limit": row[1], "goal_amount": row[2],
+                    "goal_end_date": row[3], "saved_so_far": row[4]
+                }
+            return None
 
 async def create_user(user_id: int):
     if USE_POSTGRES:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("INSERT INTO users (user_id) VALUES (%s) ON CONFLICT DO NOTHING", (user_id,))
+                cur.execute(
+                    "INSERT INTO users (user_id) VALUES (%s) ON CONFLICT DO NOTHING",
+                    (user_id,)
+                )
             conn.commit()
     else:
         async with aiosqlite.connect("finance_bot.db") as conn:
@@ -176,16 +194,19 @@ async def get_balance(user_id: int):
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT COALESCE(SUM(CASE WHEN type='income' THEN amount ELSE 0 END),0) -
-                           COALESCE(SUM(CASE WHEN type='expense' THEN amount ELSE 0 END),0)
+                    SELECT 
+                        COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0) -
+                        COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0)
                     FROM transactions WHERE user_id = %s
                 """, (user_id,))
-                return (await cur.fetchone())[0] or 0.0
+                row = cur.fetchone()
+                return row[0] if row else 0.0
     else:
         async with aiosqlite.connect("finance_bot.db") as conn:
             cursor = await conn.execute("""
-                SELECT COALESCE(SUM(CASE WHEN type='income' THEN amount ELSE 0 END),0) -
-                       COALESCE(SUM(CASE WHEN type='expense' THEN amount ELSE 0 END),0)
+                SELECT 
+                    COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0) -
+                    COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0)
                 FROM transactions WHERE user_id = ?
             """, (user_id,))
             row = await cursor.fetchone()
@@ -270,7 +291,8 @@ async def get_stats_for_month(user_id: int, year: int, month: int):
                   AND strftime('%Y', created_at) = ?
                   AND strftime('%m', created_at) = ?
             """, (user_id, str(year), f"{month:02d}"))
-            income, expense = await cursor.fetchone()
+            row = await cursor.fetchone()
+            income, expense = row[0], row[1]
 
             cursor = await conn.execute("""
                 SELECT category, SUM(amount)
