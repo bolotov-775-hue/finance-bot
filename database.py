@@ -110,20 +110,19 @@ async def set_goal(user_id, amount, end_date):
             )
             await conn.commit()
 
-async def clear_goal(user_id):
+async def clear_all(user_id):
+    """Очистить ВСЁ: транзакции, цель, задачи"""
     with get_db() as conn:
         if IS_RENDER and DATABASE_URL:
             cur = conn.cursor()
-            cur.execute(
-                "UPDATE users SET goal_amount = 0, goal_end_date = NULL WHERE user_id = %s",
-                (user_id,)
-            )
+            cur.execute("DELETE FROM transactions WHERE user_id = %s", (user_id,))
+            cur.execute("UPDATE users SET goal_amount = 0, goal_end_date = NULL WHERE user_id = %s", (user_id,))
+            cur.execute("DELETE FROM todos WHERE user_id = %s", (user_id,))
             conn.commit()
         else:
-            await conn.execute(
-                "UPDATE users SET goal_amount = 0, goal_end_date = NULL WHERE user_id = ?",
-                (user_id,)
-            )
+            await conn.execute("DELETE FROM transactions WHERE user_id = ?", (user_id,))
+            await conn.execute("UPDATE users SET goal_amount = 0, goal_end_date = NULL WHERE user_id = ?", (user_id,))
+            await conn.execute("DELETE FROM todos WHERE user_id = ?", (user_id,))
             await conn.commit()
 
 async def get_user_goal(user_id):

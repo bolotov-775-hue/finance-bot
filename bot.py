@@ -31,6 +31,7 @@ main_menu = ReplyKeyboardMarkup(
         [KeyboardButton(text="💰 Доход"), KeyboardButton(text="🛒 Расход")],
         [KeyboardButton(text="🎯 Цель"), KeyboardButton(text="📊 Лимит")],
         [KeyboardButton(text="📈 Статистика"), KeyboardButton(text="📋 Задачи")],
+        [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="🧹 Очистить всё")],
     ],
     resize_keyboard=True
 )
@@ -73,15 +74,25 @@ async def process_expense(message: Message, state: FSMContext):
         await message.answer("❌ Введите число.")
     await state.clear()
 
-# 🎯 Цель
+# 🎯 Цель — ПОКАЗ ТЕКУЩЕЙ ЦЕЛИ
 @dp.message(lambda m: m.text == "🎯 Цель")
 async def goal_menu(message: Message):
+    goal_amount, goal_end_date = await get_user_goal(message.from_user.id)
+    if goal_amount and goal_end_date:
+        try:
+            end_date = date.fromisoformat(goal_end_date) if isinstance(goal_end_date, str) else goal_end_date
+            text = f"🎯 Текущая цель: {goal_amount:.0f} ₽ к {end_date.strftime('%d.%m.%Y')}"
+        except:
+            text = f"🎯 Текущая цель: {goal_amount:.0f} ₽"
+    else:
+        text = "🎯 Цель не установлена."
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Установить цель", callback_data="goal:set")],
+        [InlineKeyboardButton(text="Изменить цель", callback_data="goal:set")],
         [InlineKeyboardButton(text="Отменить цель", callback_data="goal:clear")],
         [InlineKeyboardButton(text="← Назад", callback_data="back:main")]
     ])
-    await message.answer("🎯 Управление целью:", reply_markup=kb)
+    await message.answer(text, reply_markup=kb)
 
 @dp.callback_query(lambda c: c.data == "goal:set")
 async def goal_set(callback, state: FSMContext):
@@ -107,12 +118,33 @@ async def goal_clear(callback):
     await callback.message.edit_text("✅ Цель отменена.")
     await callback.answer()
 
-# 📊 Лимит на день — ПРАВИЛЬНАЯ ФОРМУЛА
+# 🧹 Очистить всё
+@dp.message(lambda m: m.text == "🧹 Очистить всё")
+async def clear_all_cmd(message: Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Да, очистить ВСЁ", callback_data="clear:confirm")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="back:main")]
+    ])
+    await message.answer("⚠️ Внимание! Это удалит:\n• Все доходы и расходы\n• Цель\n• Все задачи\n\nПродолжить?", reply_markup=kb)
+
+@dp.callback_query(lambda c: c.data == "clear:confirm")
+async def clear_confirm(callback):
+    await clear_all(callback.from_user.id)
+    await callback.message.edit_text("✅ Вся история очищена.")
+    await callback.answer()
+
+# 💰 Баланс
+@dp.message(lambda m: m.text == "💰 Баланс")
+async def balance_cmd(message: Message):
+    balance = await get_balance(message.from_user.id)
+    await message.answer(f"💰 Текущий баланс: {balance:.2f} ₽", reply_markup=main_menu)
+
+# 📊 Лимит на день
 @dp.message(lambda m: m.text == "📊 Лимит")
 async def daily_limit(message: Message):
     goal_amount, goal_end_date = await get_user_goal(message.from_user.id)
     if not goal_amount or not goal_end_date:
-        await message.answer("❗ Сначала установите цель через «🎯 Цель» → «Установить цель».", reply_markup=main_menu)
+        await message.answer("❗ Сначала установите цель через «🎯 Цель».", reply_markup=main_menu)
         return
 
     try:
@@ -122,25 +154,22 @@ async def daily_limit(message: Message):
             await message.answer("🎯 Срок цели истёк.", reply_markup=main_menu)
             return
 
-        income = await get_income(message.from_user.id)
         balance = await get_balance(message.from_user.id)
-        saved = balance  # упрощённо: накоплено = текущий баланс
-        to_save = max(0, goal_amount - saved)
-        daily_limit = max(0, to_save / days_left)  # ПРАВИЛЬНАЯ ФОРМУЛА
+        to_save = max(0, goal_amount - balance)
+        daily_limit = max(0, to_save / days_left)
 
         await message.answer(
             f"📊 Лимит на день:\n"
             f"🎯 Цель: {goal_amount:.0f} ₽ к {end_date.strftime('%d.%m.%Y')}\n"
-            f"💰 Накоплено: {saved:.0f} ₽\n"
+            f"💰 Баланс: {balance:.0f} ₽\n"
             f"📆 Дней осталось: {days_left}\n"
-            f"📌 Нужно откладывать: {daily_limit:.2f} ₽/день\n"
-            f"❗ Тратьте меньше этого лимита!",
+            f"📌 Нужно откладывать: {daily_limit:.2f} ₽/день",
             reply_markup=main_menu
         )
     except Exception as e:
         await message.answer("❌ Ошибка расчёта.", reply_markup=main_menu)
 
-# 📈 Статистика
+# 📈 Статистика (без изменений — работает)
 @dp.message(lambda m: m.text == "📈 Статистика")
 async def stats_menu(message: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -175,7 +204,7 @@ async def show_stats(callback):
 async def back_stats(callback):
     await stats_menu(callback.message)
 
-# 📋 Задачи — С ИНТЕРАКТИВНЫМ ВЫБОРОМ И ОТМЕТКОЙ
+# 📋 Задачи (без изменений — работает)
 @dp.message(lambda m: m.text == "📋 Задачи")
 async def todos_menu(message: Message):
     todos = await get_todos(message.from_user.id)
@@ -187,7 +216,6 @@ async def todos_menu(message: Message):
         await message.answer("📭 Нет задач.", reply_markup=kb)
         return
 
-    # Кнопки: [номер] Задача → при нажатии — выбор действия
     kb = []
     for i, (tid, text, done) in enumerate(todos, 1):
         mark = "✅ " if done else ""
@@ -202,7 +230,6 @@ async def todos_menu(message: Message):
     
     await message.answer("📋 Ваши задачи:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-# При выборе задачи — показываем действия
 @dp.callback_query(lambda c: c.data.startswith("todo:select:"))
 async def todo_select(callback):
     todo_id = int(callback.data.split(":")[2])
@@ -229,7 +256,6 @@ async def todo_select(callback):
     )
     await callback.answer()
 
-# Отметить/снять выполнение
 @dp.callback_query(lambda c: c.data.startswith("todo:toggle:"))
 async def toggle_todo_handler(callback):
     todo_id = int(callback.data.split(":")[2])
@@ -237,7 +263,6 @@ async def toggle_todo_handler(callback):
     await todos_menu(callback.message)
     await callback.answer()
 
-# Добавить задачу
 @dp.callback_query(lambda c: c.data == "todo:add")
 async def todo_add(callback, state: FSMContext):
     await callback.message.edit_text("📝 Введите задачу:")
