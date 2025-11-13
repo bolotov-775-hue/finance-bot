@@ -46,7 +46,17 @@ async def init_db():
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT,
                     text TEXT,
-                    is_done BOOLEAN DEFAULT FALSE
+                    is_done BOOLEAN DEFAULT FALSE,
+                    due_date DATE
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS reminders (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    todo_id BIGINT,
+                    trigger_type VARCHAR(10), -- 'day' or 'hour'
+                    scheduled_at TIMESTAMPTZ
                 )
             """)
             conn.commit()
@@ -73,7 +83,17 @@ async def init_db():
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER,
                     text TEXT,
-                    is_done BOOLEAN DEFAULT 0
+                    is_done BOOLEAN DEFAULT 0,
+                    due_date TEXT
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS reminders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    todo_id INTEGER,
+                    trigger_type TEXT, -- 'day' or 'hour'
+                    scheduled_at TEXT
                 )
             """)
             await conn.commit()
@@ -110,19 +130,20 @@ async def set_goal(user_id, amount, end_date):
             )
             await conn.commit()
 
-async def clear_all(user_id):
-    """Очистить ВСЁ: транзакции, цель, задачи"""
+async def clear_goal(user_id):
     with get_db() as conn:
         if IS_RENDER and DATABASE_URL:
             cur = conn.cursor()
-            cur.execute("DELETE FROM transactions WHERE user_id = %s", (user_id,))
-            cur.execute("UPDATE users SET goal_amount = 0, goal_end_date = NULL WHERE user_id = %s", (user_id,))
-            cur.execute("DELETE FROM todos WHERE user_id = %s", (user_id,))
+            cur.execute(
+                "UPDATE users SET goal_amount = 0, goal_end_date = NULL WHERE user_id = %s",
+                (user_id,)
+            )
             conn.commit()
         else:
-            await conn.execute("DELETE FROM transactions WHERE user_id = ?", (user_id,))
-            await conn.execute("UPDATE users SET goal_amount = 0, goal_end_date = NULL WHERE user_id = ?", (user_id,))
-            await conn.execute("DELETE FROM todos WHERE user_id = ?", (user_id,))
+            await conn.execute(
+                "UPDATE users SET goal_amount = 0, goal_end_date = NULL WHERE user_id = ?",
+                (user_id,)
+            )
             await conn.commit()
 
 async def get_user_goal(user_id):
@@ -196,25 +217,37 @@ async def get_expenses_by_period(user_id, period):
             row = await cursor.fetchone()
             return row[0] if row else 0.0
 
-async def add_todo(user_id, text):
+async def add_todo(user_id, text, due_date=None):
     with get_db() as conn:
         if IS_RENDER and DATABASE_URL:
             cur = conn.cursor()
-            cur.execute("INSERT INTO todos (user_id, text) VALUES (%s, %s)", (user_id, text))
+            cur.execute("INSERT INTO todos (user_id, text, due_date) VALUES (%s, %s, %s)", (user_id, text, due_date))
             conn.commit()
         else:
-            await conn.execute("INSERT INTO todos (user_id, text) VALUES (?, ?)", (user_id, text))
+            await conn.execute("INSERT INTO todos (user_id, text, due_date) VALUES (?, ?, ?)", (user_id, text, due_date))
             await conn.commit()
 
 async def get_todos(user_id):
     with get_db() as conn:
         if IS_RENDER and DATABASE_URL:
             cur = conn.cursor()
-            cur.execute("SELECT id, text, is_done FROM todos WHERE user_id = %s", (user_id,))
-            return [(r[0], r[1], r[2]) for r in cur.fetchall()]
+            cur.execute("SELECT id, text, is_done, due_date FROM todos WHERE user_id = %s", (user_id,))
+            return [(r[0], r[1], r[2], r[3]) for r in cur.fetchall()]
         else:
-            cursor = await conn.execute("SELECT id, text, is_done FROM todos WHERE user_id = ?", (user_id,))
+            cursor = await conn.execute("SELECT id, text, is_done, due_date FROM todos WHERE user_id = ?", (user_id,))
             return await cursor.fetchall()
+
+async def delete_todo(todo_id):
+    with get_db() as conn:
+        if IS_RENDER and DATABASE_URL:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM todos WHERE id = %s", (todo_id,))
+            cur.execute("DELETE FROM reminders WHERE todo_id = %s", (todo_id,))
+            conn.commit()
+        else:
+            await conn.execute("DELETE FROM todos WHERE id = ?", (todo_id,))
+            await conn.execute("DELETE FROM reminders WHERE todo_id = ?", (todo_id,))
+            await conn.commit()
 
 async def toggle_todo(todo_id):
     with get_db() as conn:
@@ -225,3 +258,36 @@ async def toggle_todo(todo_id):
         else:
             await conn.execute("UPDATE todos SET is_done = NOT is_done WHERE id = ?", (todo_id,))
             await conn.commit()
+
+async def add_reminder(user_id, todo_id, trigger_type, scheduled_at):
+    with get_db() as conn:
+        if IS_RENDER and DATABASE_URL:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO reminders (user_id, todo_id, trigger_type, scheduled_at) VALUES (%s, %s, %s, %s)",
+                (user_id, todo_id, trigger_type, scheduled_at)
+            )
+            conn.commit()
+        else:
+            await conn.execute(
+                "INSERT INTO reminders (user_id, todo_id, trigger_type, scheduled_at) VALUES (?, ?, ?, ?)",
+                (user_id, todo_id, trigger_type, scheduled_at)
+            )
+            await conn.commit()
+
+async def get_reminders_due():
+    """Возвращает напоминания, которые должны быть отправлены сейчас"""
+    with get_db() as conn:
+        if IS_RENDER and DATABASE_URL:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT user_id, todo_id, trigger_type FROM reminders
+                WHERE scheduled_at <= NOW()
+            """)
+            return cur.fetchall()
+        else:
+            cursor = await conn.execute("""
+                SELECT user_id, todo_id, trigger_type FROM reminders
+                WHERE scheduled_at <= datetime('now')
+            """)
+            return await cursor.fetchall()

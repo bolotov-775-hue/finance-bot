@@ -1,6 +1,6 @@
 import asyncio
 import os
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -24,6 +24,7 @@ class States(StatesGroup):
     expense = State()
     goal = State()
     todo = State()
+    reminder = State()
 
 # 🎨 Главное меню
 main_menu = ReplyKeyboardMarkup(
@@ -74,7 +75,7 @@ async def process_expense(message: Message, state: FSMContext):
         await message.answer("❌ Введите число.")
     await state.clear()
 
-# 🎯 Цель — ПОКАЗ ТЕКУЩЕЙ ЦЕЛИ
+# 🎯 Цель — ПОКАЗ ТЕКУЩЕЙ ЦЕЛИ ИЛИ УСТАНОВКА
 @dp.message(lambda m: m.text == "🎯 Цель")
 async def goal_menu(message: Message):
     goal_amount, goal_end_date = await get_user_goal(message.from_user.id)
@@ -90,6 +91,7 @@ async def goal_menu(message: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Изменить цель", callback_data="goal:set")],
         [InlineKeyboardButton(text="Отменить цель", callback_data="goal:clear")],
+        [InlineKeyboardButton(text="✅ Цель выполнена", callback_data="goal:done")],
         [InlineKeyboardButton(text="← Назад", callback_data="back:main")]
     ])
     await message.answer(text, reply_markup=kb)
@@ -116,6 +118,12 @@ async def process_goal(message: Message, state: FSMContext):
 async def goal_clear(callback):
     await clear_goal(callback.from_user.id)
     await callback.message.edit_text("✅ Цель отменена.")
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "goal:done")
+async def goal_done(callback):
+    await clear_goal(callback.from_user.id)
+    await callback.message.edit_text("✅ Цель выполнена и удалена.")
     await callback.answer()
 
 # 🧹 Очистить всё
@@ -169,7 +177,7 @@ async def daily_limit(message: Message):
     except Exception as e:
         await message.answer("❌ Ошибка расчёта.", reply_markup=main_menu)
 
-# 📈 Статистика (без изменений — работает)
+# 📈 Статистика
 @dp.message(lambda m: m.text == "📈 Статистика")
 async def stats_menu(message: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -204,7 +212,7 @@ async def show_stats(callback):
 async def back_stats(callback):
     await stats_menu(callback.message)
 
-# 📋 Задачи (без изменений — работает)
+# 📋 Задачи — С УДАЛЕНИЕМ ПРИ ВЫПОЛНЕНИИ
 @dp.message(lambda m: m.text == "📋 Задачи")
 async def todos_menu(message: Message):
     todos = await get_todos(message.from_user.id)
@@ -217,7 +225,7 @@ async def todos_menu(message: Message):
         return
 
     kb = []
-    for i, (tid, text, done) in enumerate(todos, 1):
+    for i, (tid, text, done, due_date) in enumerate(todos, 1):
         mark = "✅ " if done else ""
         kb.append([
             InlineKeyboardButton(
@@ -239,19 +247,20 @@ async def todo_select(callback):
         await callback.answer("Задача не найдена.")
         return
 
-    _, text, done = selected
+    _, text, done, due_date = selected
     status = "✅ Выполнено" if done else "🔲 Не выполнено"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text="✅ Отметить как выполнено" if not done else "🔲 Снять выполнение",
+            text="✅ Отметить как выполнено" if not done else "🗑 Удалить",
             callback_data=f"todo:toggle:{todo_id}"
         )],
+        [InlineKeyboardButton(text="⏰ Установить напоминание", callback_data=f"reminder:set:{todo_id}")],
         [InlineKeyboardButton(text="← Назад к списку", callback_data="back:todos")]
     ])
     
     await callback.message.edit_text(
-        f"📌 Задача: {text}\nСтатус: {status}",
+        f"📌 Задача: {text}\nСтатус: {status}\nСрок: {due_date or '—'}",
         reply_markup=kb
     )
     await callback.answer()
@@ -259,21 +268,93 @@ async def todo_select(callback):
 @dp.callback_query(lambda c: c.data.startswith("todo:toggle:"))
 async def toggle_todo_handler(callback):
     todo_id = int(callback.data.split(":")[2])
-    await toggle_todo(todo_id)
+    todos = await get_todos(callback.from_user.id)
+    selected = next((t for t in todos if t[0] == todo_id), None)
+    if not selected:
+        await callback.answer("Задача не найдена.")
+        return
+
+    _, _, done, _ = selected
+    if done:
+        # Удаляем задачу
+        await delete_todo(todo_id)
+        await callback.message.edit_text("🗑 Задача удалена.")
+    else:
+        # Отмечаем как выполненную
+        await toggle_todo(todo_id)
+        await callback.message.edit_text("✅ Задача отмечена как выполненная.")
+
     await todos_menu(callback.message)
     await callback.answer()
 
-@dp.callback_query(lambda c: c.data == "todo:add")
-async def todo_add(callback, state: FSMContext):
-    await callback.message.edit_text("📝 Введите задачу:")
-    await state.set_state(States.todo)
+# 🕒 Напоминания к задачам
+@dp.callback_query(lambda c: c.data.startswith("reminder:set:"))
+async def reminder_set(callback, state: FSMContext):
+    todo_id = int(callback.data.split(":")[2])
+    await state.update_data(todo_id=todo_id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="За 1 день", callback_data="rem:day")],
+        [InlineKeyboardButton(text="За 1 час", callback_data="rem:hour")],
+        [InlineKeyboardButton(text="Оба", callback_data="rem:both")],
+        [InlineKeyboardButton(text="← Назад", callback_data="back:todo")]
+    ])
+    await callback.message.edit_text("⏰ Когда напомнить?", reply_markup=kb)
+    await state.set_state(States.reminder)
     await callback.answer()
 
-@dp.message(States.todo)
-async def process_todo(message: Message, state: FSMContext):
-    await add_todo(message.from_user.id, message.text)
-    await message.answer("✅ Задача добавлена!", reply_markup=main_menu)
+@dp.callback_query(lambda c: c.data.startswith("rem:"))
+async def process_reminder(callback, state: FSMContext):
+    data = await state.get_data()
+    todo_id = data["todo_id"]
+    trigger_type = callback.data.split(":")[1]
+    
+    # Устанавливаем напоминание на 1 день/час до даты задачи
+    todos = await get_todos(callback.from_user.id)
+    selected = next((t for t in todos if t[0] == todo_id), None)
+    if not selected:
+        await callback.message.edit_text("Задача не найдена.")
+        await state.clear()
+        await callback.answer()
+        return
+
+    _, _, _, due_date_str = selected
+    if not due_date_str:
+        await callback.message.edit_text("❌ У задачи нет срока.")
+        await state.clear()
+        await callback.answer()
+        return
+
+    try:
+        due_date = date.fromisoformat(due_date_str) if isinstance(due_date_str, str) else due_date_str
+        now = datetime.now()
+        
+        if trigger_type == "day":
+            scheduled = datetime.combine(due_date - timedelta(days=1), now.time())
+        elif trigger_type == "hour":
+            scheduled = datetime.combine(due_date, now.time()) - timedelta(hours=1)
+        else:  # both
+            # Создаем два напоминания
+            scheduled_day = datetime.combine(due_date - timedelta(days=1), now.time())
+            scheduled_hour = datetime.combine(due_date, now.time()) - timedelta(hours=1)
+            
+            await add_reminder(callback.from_user.id, todo_id, "day", scheduled_day)
+            await add_reminder(callback.from_user.id, todo_id, "hour", scheduled_hour)
+            await callback.message.edit_text("✅ Напоминания установлены: за 1 день и за 1 час.")
+            await state.clear()
+            await callback.answer()
+            return
+        
+        await add_reminder(callback.from_user.id, todo_id, trigger_type, scheduled)
+        await callback.message.edit_text(f"✅ Напоминание установлено: за {trigger_type}")
+    except Exception as e:
+        await callback.message.edit_text("❌ Ошибка установки напоминания.")
+    
     await state.clear()
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "back:todo")
+async def back_todo(callback):
+    await todos_menu(callback.message)
 
 # ← Назад
 @dp.callback_query(lambda c: c.data == "back:main")
